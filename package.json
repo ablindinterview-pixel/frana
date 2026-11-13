@@ -1,0 +1,15 @@
+{
+  "name": "frana",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Frana: datamosh per video, interamente nel browser.",
+  "scripts": {
+    "vendor": "node scripts/vendor.mjs",
+    "build": "node scripts/vendor.mjs && node scripts/build.mjs",
+    "serve": "python3 -m http.server 8080"
+  },
+  "dependencies": {
+    "@ffmpeg/core": "^0.12.6",
+    "@ffmpeg/ffmpeg": "^0.12.10"
+  }
+}
