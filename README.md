@@ -27,6 +27,7 @@ Poi apri http://localhost:8080
 - Tutto gira sul telefono con ffmpeg a un solo thread: è più lento di un server. La prima volta scarica circa 30 MB di motore.
 - Video 4K o HEVC (tipici degli iPhone) sono lenti da decodificare. Per iniziare usa 360p/480p e una durata per clip di 3-5 secondi.
 - I browser mobili limitano la memoria: se la pagina si ricarica da sola durante l'elaborazione, riduci durata e qualità.
+- **Qualità Auto** (predefinita): sceglie risoluzione e secondi per clip in base a risoluzione, peso dei file e memoria del telefono, lo scrive a schermo e, se l'elaborazione fallisce, riprova una volta con qualità più bassa. Le scelte manuali (360/480/720p) non vengono modificate.
 - Tieni lo schermo acceso durante l'elaborazione.
 
 ## Se qualcosa non va

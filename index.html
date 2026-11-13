@@ -222,10 +222,12 @@
       <div class="row">
         <div class="lab">Qualità</div>
         <div class="seg" id="qual">
+          <label><input type="radio" name="height" value="auto" checked><span>Auto</span></label>
           <label><input type="radio" name="height" value="360"><span>360p</span></label>
-          <label><input type="radio" name="height" value="480" checked><span>480p</span></label>
+          <label><input type="radio" name="height" value="480"><span>480p</span></label>
           <label><input type="radio" name="height" value="720"><span>720p</span></label>
         </div>
+        <p class="help">Auto sceglie qualità e durata in base al peso dei tuoi video e, se serve, riprova da sola con una qualità più bassa.</p>
       </div>
     </div>
   </section>
@@ -384,7 +386,7 @@ function thumbFor(it) {
     v.removeAttribute('src'); v.load();   // il video temporaneo non deve più leggere l'URL
     URL.revokeObjectURL(url); render();
   };
-  v.onloadedmetadata = () => { it.dur = isFinite(v.duration) ? v.duration : null; try { v.currentTime = Math.min(0.1, (v.duration || 0) / 2); } catch (e) { done(); } };
+  v.onloadedmetadata = () => { it.dur = isFinite(v.duration) ? v.duration : null; it.w = v.videoWidth; it.h = v.videoHeight; try { v.currentTime = Math.min(0.1, (v.duration || 0) / 2); } catch (e) { done(); } };
   v.onseeked = () => { try { const c = document.createElement('canvas'); c.width = c.height = 120;
       const x = c.getContext('2d'), s = Math.min(v.videoWidth, v.videoHeight), sx = (v.videoWidth - s) / 2, sy = (v.videoHeight - s) / 2;
       x.drawImage(v, sx, sy, s, s, 0, 0, 120, 120); it.thumb = c.toDataURL('image/jpeg', .72); } catch (e) {} done(); };
@@ -464,11 +466,42 @@ function say(t, err) {
 let engine = null, cache = null, lastBlob = null, lastUrl = null, wake = null, cancelled = false;
 const makeEngine = () => (window.__FRANA_ENGINE || WasmEngine.create)();
 
+const LOAD_RE = /File mancante|FFmpegWASM|Failed to fetch|NetworkError|importScripts|Failed to construct 'Worker'/i;
 function friendly(e) {
   const m = String((e && e.message) || e);
-  if (/File mancante|FFmpegWASM|Failed to fetch|NetworkError|importScripts|wasm/i.test(m))
-    return 'Non riesco a caricare il motore video. Controlla la connessione e riprova.';
+  if (LOAD_RE.test(m)) return 'Non riesco a caricare il motore video. Controlla la connessione e riprova.';
+  if (/memory|OOM|out of bounds|Aborted/i.test(m)) return 'Memoria insufficiente: prova con meno secondi per clip o una qualità più bassa.';
   return m;
+}
+
+/* ---------- modalità Auto: qualità e durata in base al peso dei video ---------- */
+const LADDER = [360, 480, 720];
+function notice(plan, retried) {
+  const why = plan.why.length ? ` Motivo: ${plan.why.join(', ')}.` : '';
+  return retried
+    ? `Era troppo pesante per il telefono: riprovo a ${plan.q}p con ${plan.seconds} s per clip.`
+    : `Modalità Auto: lavoro a ${plan.q}p con ${plan.seconds} s per clip.${why}`;
+}
+function autoPlan(wantedSec) {
+  const known = items.filter(i => i.w && i.h);
+  const maxSide  = known.length ? Math.max(...known.map(i => Math.max(i.w, i.h))) : 1080;
+  const srcShort = known.length ? Math.max(...known.map(i => Math.min(i.w, i.h))) : 720;
+  const totalMB = items.reduce((a, i) => a + i.size, 0) / 1e6;
+  const mem = navigator.deviceMemory || 0;            // 0 = sconosciuta (per esempio Safari)
+  const why = [];
+  let level = LADDER.length - 1;
+  while (level > 0 && LADDER[level] > srcShort) level--;          // mai più grande dell'originale
+  const cap = l => { if (l < level) level = l; };
+  if (maxSide >= 1440)      { cap(0); why.push('alta risoluzione'); }
+  else if (maxSide >= 1080) { cap(1); why.push('Full HD'); }
+  if (totalMB > 300)        { cap(0); why.push('file molto grandi'); }
+  else if (totalMB > 120)   { cap(1); why.push('file grandi'); }
+  if (mem && mem < 4)       { level = Math.max(0, level - 1); why.push('poca memoria'); }
+  let sec = wantedSec;
+  if (maxSide >= 2160 || totalMB > 300) sec = Math.min(sec, 3);
+  else if (maxSide >= 1440)             sec = Math.min(sec, 4);
+  if (items.length * sec > 40) sec = Math.max(2, Math.floor(40 / items.length));   // uscita al massimo ~40 s
+  return { level, q: LADDER[level], seconds: sec, why };
 }
 
 async function run() {
@@ -478,39 +511,56 @@ async function run() {
   $('cancel').hidden = false;
   render();
   const fmt = document.querySelector('input[name=format]:checked').value;
-  const q = +document.querySelector('input[name=height]:checked').value;
-  const opts = {
-    height: fmt === 'vertical' ? Math.floor(q * 16 / 9) : q,
-    width: fmt === 'vertical' ? q : Math.floor(q * 16 / 9),
-    fps: 30, seconds: +$('seconds').value, bloom: +$('bloom').value,
+  const qsel = document.querySelector('input[name=height]:checked').value;
+  const wantedSec = +$('seconds').value;
+  let plan = qsel === 'auto' ? autoPlan(wantedSec) : { level: null, q: +qsel, seconds: wantedSec, why: [] };
+  const base = {
+    fps: 30, bloom: +$('bloom').value,
     mode: document.querySelector('input[name=mode]:checked').value,
     seed: crypto.getRandomValues(new Uint32Array(1))[0],
   };
-  try {
-    try { wake = await (navigator.wakeLock && navigator.wakeLock.request('screen')); } catch (e) { wake = null; }
-    if (!engine) {
-      state('Preparo il motore video…', 'busy work');
-      say('La prima volta scarica circa 30 MB.');
-      engine = await makeEngine();
-      say('');
+  try { wake = await (navigator.wakeLock && navigator.wakeLock.request('screen')); } catch (e) { wake = null; }
+
+  for (let attempt = 0; ; attempt++) {
+    try {
+      if (!engine) {
+        state('Preparo il motore video…', 'busy work');
+        say('La prima volta scarica circa 30 MB.');
+        engine = await makeEngine();
+        say('');
+      }
+      const opts = { ...base, seconds: plan.seconds,
+        height: fmt === 'vertical' ? Math.floor(plan.q * 16 / 9) : plan.q,
+        width:  fmt === 'vertical' ? plan.q : Math.floor(plan.q * 16 / 9) };
+      if (qsel === 'auto') say(notice(plan, attempt > 0));
+      $('list').classList.add('working');
+      const res = await Mosh.render(engine, items.map(i => i.file), opts, cache, s => {
+        const pct = Math.min(99, Math.round((s.stage + s.frac) / s.total * 100));
+        state(`${s.label} · ${pct}%`, 'busy', pct);
+      });
+      cache = res.cache;
+      if (lastUrl) URL.revokeObjectURL(lastUrl);
+      lastBlob = new Blob([res.mp4], { type: 'video/mp4' });
+      lastUrl = URL.createObjectURL(lastBlob);
+      $('frame').className = fmt === 'vertical' ? 'v' : 'h';
+      $('vid').src = lastUrl; $('dl').href = lastUrl; $('dl').download = 'frana.mp4';
+      $('out').hidden = false; replay($('out'), 'rise'); replay($('frame'), 'glitch');
+      $('vid').play().catch(() => {});
+      $('out').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      break;
+    } catch (e) {
+      if (cancelled) break;
+      if (engine) { engine.terminate(); engine = null; }   // dopo un errore si riparte da un motore pulito
+      const loadProblem = LOAD_RE.test(String((e && e.message) || e));
+      if (qsel === 'auto' && plan.level > 0 && attempt < 1 && !loadProblem) {
+        plan = { ...plan, level: plan.level - 1, q: LADDER[plan.level - 1], seconds: Math.min(plan.seconds, 3) };
+        console.warn('Riprovo a qualità più bassa:', e);
+        state(`Troppo pesante: riprovo a ${plan.q}p…`, 'busy work');
+        continue;
+      }
+      console.error(e); say(friendly(e), true);
+      break;
     }
-    $('list').classList.add('working');
-    const res = await Mosh.render(engine, items.map(i => i.file), opts, cache, s => {
-      const pct = Math.min(99, Math.round((s.stage + s.frac) / s.total * 100));
-      state(`${s.label} · ${pct}%`, 'busy', pct);
-    });
-    cache = res.cache;
-    if (lastUrl) URL.revokeObjectURL(lastUrl);
-    lastBlob = new Blob([res.mp4], { type: 'video/mp4' });
-    lastUrl = URL.createObjectURL(lastBlob);
-    $('frame').className = fmt === 'vertical' ? 'v' : 'h';
-    $('vid').src = lastUrl; $('dl').href = lastUrl; $('dl').download = 'frana.mp4';
-    $('out').hidden = false; replay($('out'), 'rise'); replay($('frame'), 'glitch');
-    $('vid').play().catch(() => {});
-    $('out').scrollIntoView({ behavior: 'smooth', block: 'start' });
-  } catch (e) {
-    if (!cancelled) { console.error(e); say(friendly(e), true); }
-    if (engine) { engine.terminate(); engine = null; }   // dopo un errore si riparte da un motore pulito
   }
   if (wake) { try { wake.release(); } catch (e) {} wake = null; }
   busy = false; $('cancel').hidden = true; $('list').classList.remove('working'); render();
